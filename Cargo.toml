@@ -1,0 +1,17 @@
+[package]
+name = "agnt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = "0.7"
+ratatui = "0.29"
+crossterm = "0.29"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+futures-util = "0.3"
+clap = { version = "4.5", features = ["derive"] }
+chrono = "0.4"

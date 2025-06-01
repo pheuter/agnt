@@ -1,0 +1,6 @@
+/target
+/output
+Cargo.lock
+.env
+agnt-log.txt
+.DS_Store
