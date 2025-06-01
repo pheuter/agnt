@@ -178,9 +178,13 @@ impl App {
 }
 
 pub fn ui(f: &mut Frame, app: &mut App) {
+    // Calculate input height based on content (min 3, max 10 lines)
+    let input_lines = app.input.split('\n').count().max(1);
+    let input_height = (input_lines + 2).clamp(3, 10) as u16; // +2 for borders
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)].as_ref())
+        .constraints([Constraint::Min(5), Constraint::Length(input_height)].as_ref())
         .split(f.area());
 
     render_messages(f, app, chunks[0]);
@@ -354,7 +358,7 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
             Color::Cyan
         };
         (
-            "Input (Enter: send, Ctrl+C: quit, Ctrl+S: selection, Ctrl+X: toggle code)",
+            "Input (Enter: send, Alt+Enter: newline, Ctrl+C: quit, Ctrl+S: selection, Ctrl+X: toggle code)",
             border_color,
         )
     };
@@ -371,8 +375,29 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(input, area);
 
-    // Always show cursor
-    f.set_cursor_position((area.x + app.input.len() as u16 + 1, area.y + 1));
+    // Calculate cursor position for multi-line input
+    // Split by \n to handle trailing newlines properly
+    let lines: Vec<&str> = app.input.split('\n').collect();
+    let current_line = lines.len().saturating_sub(1);
+    let last_line_len = lines.last().map(|l| l.len()).unwrap_or(0);
+
+    // Account for wrapped lines
+    let available_width = area.width.saturating_sub(2) as usize; // -2 for borders
+    let mut cursor_y = area.y + 1;
+
+    for (i, line) in lines.iter().enumerate() {
+        if i == current_line {
+            break;
+        }
+        // Calculate wrapped lines for this line
+        let wrapped_count = line.len().div_ceil(available_width).max(1);
+        cursor_y += wrapped_count as u16;
+    }
+
+    // Calculate x position on the last line
+    let cursor_x = area.x + 1 + (last_line_len % available_width) as u16;
+
+    f.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn render_content(lines: &mut Vec<Line<'static>>, content: &MessageContent, prefix: &str) {

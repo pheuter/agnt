@@ -378,6 +378,9 @@ async fn run_app(
                                 output_dir = Some("output".to_string());
                             }
                         }
+                        KeyCode::Enter if key.modifiers.intersects(event::KeyModifiers::ALT) => {
+                            app.input.push('\n');
+                        }
                         KeyCode::Enter => {
                             if !app.input.is_empty() && !app.is_waiting {
                                 let user_message = app.input.clone();
