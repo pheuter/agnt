@@ -158,6 +158,7 @@ pub enum StreamEvent {
         id: String,
         expires_at: String,
     },
+    ConnectionStatus(String),
 }
 
 impl AnthropicClient {
@@ -182,93 +183,120 @@ impl AnthropicClient {
         &self,
         messages: Vec<Message>,
     ) -> Result<(mpsc::Receiver<StreamEvent>, CancellationToken)> {
-        let tools = if self.enable_code_execution {
-            Some(vec![Tool {
-                tool_type: "code_execution_20250522".to_string(),
-                name: "code_execution".to_string(),
-            }])
-        } else {
-            None
-        };
-
-        let model = std::env::var("ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
-
-        let request = MessagesRequest {
-            model,
-            messages,
-            max_tokens: 4096,
-            stream: true,
-            tools,
-        };
-
-        let mut request_builder = self
-            .client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json");
-
-        if self.enable_code_execution {
-            request_builder = request_builder.header(
-                "anthropic-beta",
-                "code-execution-2025-05-22,files-api-2025-04-14",
-            );
-        }
-
-        let response = match request_builder.json(&request).send().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                log_debug!("Failed to send request to Messages API: {}", e);
-                if e.to_string().contains("dns") || e.to_string().contains("connect") {
-                    log_debug!("Network/connection error detected");
-                } else if e.to_string().contains("timed out") {
-                    log_debug!("Request timeout error");
-                }
-                return Err(anyhow::anyhow!("Failed to connect to Anthropic API: {}", e));
-            }
-        };
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_else(|e| {
-                log_debug!("Failed to read error response body: {}", e);
-                "Failed to read error response".to_string()
-            });
-
-            log_debug!("API error response (status {}): {}", status, error_text);
-
-            // Parse specific error types
-            if status == 401 {
-                log_debug!("Authentication error - invalid or missing API key");
-                return Err(anyhow::anyhow!(
-                    "Invalid or missing API key: {}",
-                    error_text
-                ));
-            } else if status == 400 {
-                if error_text.contains("model") {
-                    log_debug!("Invalid model name error");
-                    return Err(anyhow::anyhow!("Invalid model name: {}", error_text));
-                } else {
-                    log_debug!("Bad request error");
-                    return Err(anyhow::anyhow!("Bad request: {}", error_text));
-                }
-            } else if status == 429 {
-                log_debug!("Rate limit error");
-                return Err(anyhow::anyhow!("Rate limit exceeded: {}", error_text));
-            } else if status.is_server_error() {
-                log_debug!("Server error ({})", status);
-                return Err(anyhow::anyhow!("Anthropic server error: {}", error_text));
-            }
-
-            return Err(anyhow::anyhow!("API error ({}): {}", status, error_text));
-        }
-
         let (tx, rx) = mpsc::channel(100);
         let cancellation_token = CancellationToken::new();
         let token_clone = cancellation_token.clone();
 
+        // Clone necessary data for the spawned task
+        let api_key = self.api_key.clone();
+        let client = self.client.clone();
+        let enable_code_execution = self.enable_code_execution;
+
+        // Spawn the entire request handling as a separate task
         tokio::spawn(async move {
+            // Send initial connection status
+            let _ = tx
+                .send(StreamEvent::ConnectionStatus(
+                    "Connecting to Claude API...".to_string(),
+                ))
+                .await;
+
+            // Build the request
+            let tools = if enable_code_execution {
+                Some(vec![Tool {
+                    tool_type: "code_execution_20250522".to_string(),
+                    name: "code_execution".to_string(),
+                }])
+            } else {
+                None
+            };
+
+            let model = std::env::var("ANTHROPIC_MODEL")
+                .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+
+            let request = MessagesRequest {
+                model,
+                messages,
+                max_tokens: 4096,
+                stream: true,
+                tools,
+            };
+
+            let mut request_builder = client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json");
+
+            if enable_code_execution {
+                request_builder = request_builder.header(
+                    "anthropic-beta",
+                    "code-execution-2025-05-22,files-api-2025-04-14",
+                );
+            }
+
+            // Send the request (this is now in the spawned task)
+            let _ = tx
+                .send(StreamEvent::ConnectionStatus(
+                    "Sending request...".to_string(),
+                ))
+                .await;
+            let response = match request_builder.json(&request).send().await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    log_debug!("Failed to send request to Messages API: {}", e);
+                    if e.to_string().contains("dns") || e.to_string().contains("connect") {
+                        log_debug!("Network/connection error detected");
+                    } else if e.to_string().contains("timed out") {
+                        log_debug!("Request timeout error");
+                    }
+                    // Send error through the channel
+                    let error_msg = format!("Failed to connect to Anthropic API: {}", e);
+                    let _ = tx
+                        .send(StreamEvent::Text(format!("\n\nError: {}\n", error_msg)))
+                        .await;
+                    return;
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let error_text = response.text().await.unwrap_or_else(|e| {
+                    log_debug!("Failed to read error response body: {}", e);
+                    "Failed to read error response".to_string()
+                });
+
+                log_debug!("API error response (status {}): {}", status, error_text);
+
+                // Parse specific error types and send through channel
+                let error_msg = if status == 401 {
+                    log_debug!("Authentication error - invalid or missing API key");
+                    format!("Invalid or missing API key: {}", error_text)
+                } else if status == 400 {
+                    if error_text.contains("model") {
+                        log_debug!("Invalid model name error");
+                        format!("Invalid model name: {}", error_text)
+                    } else {
+                        log_debug!("Bad request error");
+                        format!("Bad request: {}", error_text)
+                    }
+                } else if status == 429 {
+                    log_debug!("Rate limit error");
+                    format!("Rate limit exceeded: {}", error_text)
+                } else if status.is_server_error() {
+                    log_debug!("Server error ({})", status);
+                    format!("Anthropic server error: {}", error_text)
+                } else {
+                    format!("API error ({}): {}", status, error_text)
+                };
+
+                let _ = tx
+                    .send(StreamEvent::Text(format!("\n\nError: {}\n", error_msg)))
+                    .await;
+                return;
+            }
+
+            // Process the streaming response
             let mut stream = response.bytes_stream();
             let mut buffer = String::new();
             let mut current_code_input = String::new();

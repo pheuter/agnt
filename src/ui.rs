@@ -19,6 +19,7 @@ pub enum MessageContent {
         files: Vec<(String, String)>, // (file_id, filename)
     },
     CodeError(String),
+    ApiError(String),
 }
 
 pub struct App {
@@ -32,6 +33,9 @@ pub struct App {
     pub selection_mode: bool,                   // Toggle for text selection mode
     pub container_info: Option<(String, String)>, // Container ID and expiration
     pub code_execution_enabled: bool,           // Whether code execution is enabled
+    pub loading_animation_frame: usize,         // Current frame of loading animation
+    pub last_animation_update: std::time::Instant, // Time of last animation update
+    pub connection_status: Option<String>,      // Current connection status
 }
 
 impl Default for App {
@@ -47,6 +51,9 @@ impl Default for App {
             selection_mode: false,
             container_info: None,
             code_execution_enabled: false,
+            loading_animation_frame: 0,
+            last_animation_update: std::time::Instant::now(),
+            connection_status: None,
         }
     }
 }
@@ -64,7 +71,17 @@ impl App {
 
     pub fn start_streaming(&mut self) {
         self.streaming_content.clear();
+        self.loading_animation_frame = 0;
+        self.last_animation_update = std::time::Instant::now();
         // Auto-scroll will be handled during rendering
+    }
+
+    pub fn update_loading_animation(&mut self) {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_animation_update).as_millis() >= 300 {
+            self.loading_animation_frame = (self.loading_animation_frame + 1) % 3;
+            self.last_animation_update = now;
+        }
     }
 
     pub fn append_streaming_text(&mut self, text: &str) {
@@ -102,8 +119,17 @@ impl App {
             .push(MessageContent::CodeError(error));
     }
 
+    pub fn add_api_error(&mut self, error: String) {
+        self.messages
+            .push(("system".to_string(), vec![MessageContent::ApiError(error)]));
+    }
+
     pub fn set_container_info(&mut self, id: String, expires_at: String) {
         self.container_info = Some((id, expires_at));
+    }
+
+    pub fn set_connection_status(&mut self, status: Option<String>) {
+        self.connection_status = status;
     }
 
     pub fn finish_streaming(&mut self) {
@@ -111,6 +137,7 @@ impl App {
             let content = std::mem::take(&mut self.streaming_content);
             self.messages.push(("assistant".to_string(), content));
         }
+        self.connection_status = None;
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
@@ -273,6 +300,12 @@ fn build_message_lines(app: &App, available_width: usize) -> (Vec<Line<'static>>
                     render_content(&mut lines, content, "  ");
                 }
             }
+            "system" => {
+                // System messages (API errors, etc.) - render without header
+                for content in contents {
+                    render_content(&mut lines, content, "");
+                }
+            }
             _ => {}
         }
 
@@ -280,8 +313,8 @@ fn build_message_lines(app: &App, available_width: usize) -> (Vec<Line<'static>>
         lines.push(Line::from(""));
     }
 
-    // Add streaming content if present
-    if !app.streaming_content.is_empty() {
+    // Add streaming content if present OR if waiting for response
+    if !app.streaming_content.is_empty() || app.is_waiting {
         // Streaming header
         lines.push(Line::from(vec![Span::styled(
             "◆ Claude".to_string(),
@@ -294,13 +327,34 @@ fn build_message_lines(app: &App, available_width: usize) -> (Vec<Line<'static>>
             || (app.streaming_content.len() == 1
                 && matches!(&app.streaming_content[0], MessageContent::Text(t) if t.is_empty()))
         {
+            // Render loading animation
+            let dots = match app.loading_animation_frame % 3 {
+                0 => "●○○",
+                1 => "○●○",
+                2 => "○○●",
+                _ => "●○○",
+            };
+
+            // Show connection status if available, otherwise show "Thinking..."
+            let status_text = if let Some(ref status) = app.connection_status {
+                format!(" {}", status)
+            } else {
+                " Thinking...".to_string()
+            };
+
             lines.push(Line::from(vec![
                 Span::raw("  ".to_string()),
                 Span::styled(
-                    "▸".to_string(),
+                    dots.to_string(),
                     Style::default()
                         .fg(Color::Yellow)
-                        .add_modifier(Modifier::RAPID_BLINK),
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    status_text,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 ),
             ]));
         } else {
@@ -533,6 +587,16 @@ fn render_content(lines: &mut Vec<Line<'static>>, content: &MessageContent, pref
                 Span::raw(prefix.to_string()),
                 Span::styled(
                     "⚠ Code Execution Error: ".to_string(),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(error.to_string(), Style::default().fg(Color::Red)),
+            ]));
+        }
+        MessageContent::ApiError(error) => {
+            lines.push(Line::from(vec![
+                Span::raw(prefix.to_string()),
+                Span::styled(
+                    "❌ API Error: ".to_string(),
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(error.to_string(), Style::default().fg(Color::Red)),

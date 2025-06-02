@@ -190,6 +190,9 @@ async fn run_pipe_mode(
             anthropic::StreamEvent::ContainerInfo { .. } => {
                 // Don't print container info in pipe mode
             }
+            anthropic::StreamEvent::ConnectionStatus(_) => {
+                // Don't print connection status in pipe mode
+            }
         }
         use std::io::Write;
         io::stdout().flush()?;
@@ -252,6 +255,11 @@ async fn run_app(
     let (metadata_tx, mut metadata_rx) = mpsc::channel::<(String, String)>(100);
 
     loop {
+        // Update loading animation if waiting
+        if app.is_waiting {
+            app.update_loading_animation();
+        }
+
         terminal.draw(|f| ui::ui(f, app))?;
 
         // Handle file metadata updates
@@ -264,6 +272,8 @@ async fn run_app(
             match receiver.try_recv() {
                 Ok(event) => match event {
                     anthropic::StreamEvent::Text(text) => {
+                        // Clear connection status once we start receiving content
+                        app.set_connection_status(None);
                         app.append_streaming_text(&text);
                     }
                     anthropic::StreamEvent::CodeInput(code) => {
@@ -322,6 +332,10 @@ async fn run_app(
                     anthropic::StreamEvent::ContainerInfo { id, expires_at } => {
                         app.set_container_info(id, expires_at);
                     }
+                    anthropic::StreamEvent::ConnectionStatus(status) => {
+                        app.set_connection_status(Some(status.clone()));
+                        log_debug!("Connection status: {}", status);
+                    }
                 },
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     // Stream finished
@@ -336,7 +350,14 @@ async fn run_app(
             }
         }
 
-        if event::poll(Duration::from_millis(10))? {
+        // Use shorter poll timeout when animating
+        let poll_timeout = if app.is_waiting {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(100)
+        };
+
+        if event::poll(poll_timeout)? {
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press {
@@ -421,17 +442,20 @@ async fn run_app(
                                 let client_with_code = client
                                     .clone()
                                     .with_code_execution(app.code_execution_enabled);
+
+                                // send_message_stream now returns immediately with channel and cancellation token
                                 match client_with_code.send_message_stream(messages).await {
                                     Ok((receiver, cancellation)) => {
                                         stream_receiver = Some(receiver);
                                         stream_cancellation = Some(cancellation);
                                     }
                                     Err(e) => {
+                                        // This should rarely happen now as most errors are sent through the channel
                                         app.finish_streaming();
-                                        app.add_message(
-                                            "system".to_string(),
-                                            format!("Error: {}", e),
-                                        );
+                                        app.add_api_error(format!(
+                                            "Failed to start request: {}",
+                                            e
+                                        ));
                                         app.is_waiting = false;
                                     }
                                 }
@@ -545,7 +569,13 @@ async fn download_and_save_file(
             // Write the actual file content
             let mut file = fs::File::create(&filepath)?;
             file.write_all(&content)?;
-            log_debug!("Downloaded: {}", filepath.display());
+            log_debug!(
+                "Downloaded: {}",
+                filepath
+                    .canonicalize()
+                    .unwrap_or(filepath.clone())
+                    .display()
+            );
         }
         Err(e) => {
             // If download fails, create a placeholder file with error information

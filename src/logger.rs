@@ -1,6 +1,7 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
+    path::PathBuf,
     sync::Mutex,
 };
 
@@ -20,11 +21,22 @@ impl Drop for LoggerGuard {
 }
 
 pub fn init_logger() -> Result<LoggerGuard, std::io::Error> {
+    // Get home directory and create ~/.agnt/logs.txt path
+    let log_path = if let Some(home_dir) = dirs::home_dir() {
+        let agnt_dir = home_dir.join(".agnt");
+        // Create directory if it doesn't exist
+        fs::create_dir_all(&agnt_dir)?;
+        agnt_dir.join("logs.txt")
+    } else {
+        // Fallback to current directory if home directory cannot be determined
+        PathBuf::from("agnt-log.txt")
+    };
+
     let file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open("agnt-log.txt")?;
+        .open(&log_path)?;
 
     if let Ok(mut log_guard) = LOG_FILE.lock() {
         *log_guard = Some(file);

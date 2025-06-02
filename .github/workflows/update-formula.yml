@@ -1,0 +1,131 @@
+name: Update Homebrew Formula
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (without v prefix)"
+        required: true
+        type: string
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets
+        run: |
+          VERSION="v${{ github.event.inputs.version }}"
+          wget -q "https://github.com/${{ github.repository }}/releases/download/${VERSION}/agnt-x86_64-apple-darwin.tar.gz"
+          wget -q "https://github.com/${{ github.repository }}/releases/download/${VERSION}/agnt-aarch64-apple-darwin.tar.gz"
+          wget -q "https://github.com/${{ github.repository }}/releases/download/${VERSION}/agnt-x86_64-unknown-linux-gnu.tar.gz"
+          wget -q "https://github.com/${{ github.repository }}/releases/download/${VERSION}/agnt-aarch64-unknown-linux-gnu.tar.gz"
+
+      - name: Calculate checksums
+        id: checksums
+        run: |
+          echo "SHA_X86_64_DARWIN=$(sha256sum agnt-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "SHA_AARCH64_DARWIN=$(sha256sum agnt-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "SHA_X86_64_LINUX=$(sha256sum agnt-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "SHA_AARCH64_LINUX=$(sha256sum agnt-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Update formula
+        run: |
+          # Update all values in one pass using awk
+          awk \
+            -v VERSION="${{ github.event.inputs.version }}" \
+            -v SHA_X86_64="${{ steps.checksums.outputs.SHA_X86_64_DARWIN }}" \
+            -v SHA_AARCH64="${{ steps.checksums.outputs.SHA_AARCH64_DARWIN }}" \
+            -v SHA_LINUX_X86_64="${{ steps.checksums.outputs.SHA_X86_64_LINUX }}" \
+            -v SHA_LINUX_AARCH64="${{ steps.checksums.outputs.SHA_AARCH64_LINUX }}" \
+            '
+            # Update version
+            /version "/ {
+                gsub(/version "[^"]*"/, "version \"" VERSION "\"")
+            }
+            
+            # Track which section we are in
+            /on_macos do/ { 
+                in_macos = 1
+                in_linux = 0
+            }
+            
+            /on_linux do/ { 
+                in_linux = 1
+                in_macos = 0
+            }
+            
+            # Handle macOS Intel SHA
+            in_macos && /if Hardware::CPU\.intel\?/ {
+                in_mac_intel = 1
+            }
+            
+            in_mac_intel && /sha256/ {
+                gsub(/sha256 "[^"]*"/, "sha256 \"" SHA_X86_64 "\"")
+                in_mac_intel = 0
+            }
+            
+            # Handle macOS ARM SHA
+            in_macos && /else/ && !in_linux {
+                in_mac_arm = 1
+            }
+            
+            in_mac_arm && /sha256/ {
+                gsub(/sha256 "[^"]*"/, "sha256 \"" SHA_AARCH64 "\"")
+                in_mac_arm = 0
+            }
+            
+            # Handle Linux Intel SHA
+            in_linux && /if Hardware::CPU\.intel\?/ {
+                in_linux_intel = 1
+            }
+            
+            in_linux_intel && /sha256/ && SHA_LINUX_X86_64 {
+                gsub(/sha256 "[^"]*"/, "sha256 \"" SHA_LINUX_X86_64 "\"")
+                in_linux_intel = 0
+            }
+            
+            # Handle Linux ARM SHA
+            in_linux && /else/ {
+                in_linux_arm = 1
+            }
+            
+            in_linux_arm && /sha256/ && SHA_LINUX_AARCH64 {
+                gsub(/sha256 "[^"]*"/, "sha256 \"" SHA_LINUX_AARCH64 "\"")
+                in_linux_arm = 0
+            }
+            
+            # Reset flags at end blocks
+            /^  end/ {
+                if (in_macos) {
+                    in_macos = 0
+                    in_mac_intel = 0
+                    in_mac_arm = 0
+                }
+                if (in_linux) {
+                    in_linux = 0
+                    in_linux_intel = 0
+                    in_linux_arm = 0
+                }
+            }
+            
+            { print }
+            ' homebrew/agnt.rb > homebrew/agnt.rb.tmp && mv homebrew/agnt.rb.tmp homebrew/agnt.rb
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "Update agnt formula to ${{ github.event.inputs.version }}"
+          title: "Update agnt formula to ${{ github.event.inputs.version }}"
+          body: |
+            Updates the Homebrew formula for agnt to version ${{ github.event.inputs.version }}
+
+            Checksums:
+            - x86_64-apple-darwin: ${{ steps.checksums.outputs.SHA_X86_64_DARWIN }}
+            - aarch64-apple-darwin: ${{ steps.checksums.outputs.SHA_AARCH64_DARWIN }}
+            - x86_64-unknown-linux-gnu: ${{ steps.checksums.outputs.SHA_X86_64_LINUX }}
+            - aarch64-unknown-linux-gnu: ${{ steps.checksums.outputs.SHA_AARCH64_LINUX }}
+          branch: update-formula-${{ github.event.inputs.version }}
+          base: main
