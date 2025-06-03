@@ -105,6 +105,7 @@ pub struct App {
     pub show_help: bool,                        // Whether to show help modal
     pub slash_command_state: Option<SlashCommandState>, // Slash command autocomplete state
     pub available_commands: Vec<SlashCommand>,  // Available slash commands
+    pub system_prompt: String,                  // System prompt for the AI
 }
 
 impl Default for App {
@@ -114,6 +115,8 @@ impl Default for App {
             description: "Clear the conversation history".to_string(),
             action: SlashCommandAction::Clear,
         }];
+
+        let default_system_prompt = "You are a helpful assistant. Your knowledge cut-off is March 2025. The current date and time is [DATE_TIME_WITH_WEEKDAY_AND_TIMEZONE]".to_string();
 
         Self {
             input: String::new(),
@@ -132,6 +135,7 @@ impl Default for App {
             show_help: false,
             slash_command_state: None,
             available_commands,
+            system_prompt: default_system_prompt,
         }
     }
 }

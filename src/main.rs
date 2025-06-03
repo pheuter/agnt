@@ -130,7 +130,10 @@ async fn run_pipe_mode(
         content: full_message,
     }];
 
-    let (mut receiver, _cancellation) = client.send_message_stream(messages).await?;
+    // Use default system prompt for pipe mode
+    let default_prompt = "You are a helpful assistant. Your knowledge cut-off is March 2025. The current date and time is [DATE_TIME_WITH_WEEKDAY_AND_TIMEZONE]".to_string();
+    let system_prompt = Some(substitute_datetime_placeholder(&default_prompt));
+    let (mut receiver, _cancellation) = client.send_message_stream(messages, system_prompt).await?;
 
     // Stream response to stdout
     while let Some(event) = receiver.recv().await {
@@ -505,7 +508,12 @@ async fn run_app(
                                     client.clone().with_tool_mode(app.tool_mode);
 
                                 // send_message_stream now returns immediately with channel and cancellation token
-                                match client_with_tools.send_message_stream(messages).await {
+                                let system_prompt =
+                                    Some(substitute_datetime_placeholder(&app.system_prompt));
+                                match client_with_tools
+                                    .send_message_stream(messages, system_prompt)
+                                    .await
+                                {
                                     Ok((receiver, cancellation)) => {
                                         stream_receiver = Some(receiver);
                                         stream_cancellation = Some(cancellation);
@@ -684,4 +692,36 @@ async fn download_and_save_file(
     }
 
     Ok(())
+}
+
+fn substitute_datetime_placeholder(prompt: &str) -> String {
+    use chrono::{Datelike, Local, Timelike};
+
+    let now = Local::now();
+    let weekday = match now.weekday() {
+        chrono::Weekday::Mon => "Monday",
+        chrono::Weekday::Tue => "Tuesday",
+        chrono::Weekday::Wed => "Wednesday",
+        chrono::Weekday::Thu => "Thursday",
+        chrono::Weekday::Fri => "Friday",
+        chrono::Weekday::Sat => "Saturday",
+        chrono::Weekday::Sun => "Sunday",
+    };
+
+    let datetime_str = format!(
+        "{}, {} {}, {} at {:02}:{:02}:{:02} {}",
+        weekday,
+        now.format("%B"),
+        now.day(),
+        now.year(),
+        now.hour12().1,
+        now.minute(),
+        now.second(),
+        if now.hour12().0 { "PM" } else { "AM" }
+    );
+
+    let timezone = now.format("%Z").to_string();
+    let full_datetime = format!("{} {}", datetime_str, timezone);
+
+    prompt.replace("[DATE_TIME_WITH_WEEKDAY_AND_TIMEZONE]", &full_datetime)
 }

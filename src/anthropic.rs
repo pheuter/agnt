@@ -35,6 +35,8 @@ struct MessagesRequest {
     max_tokens: u32,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<Tool>>,
 }
 
@@ -184,6 +186,7 @@ impl AnthropicClient {
     pub async fn send_message_stream(
         &self,
         messages: Vec<Message>,
+        system_prompt: Option<String>,
     ) -> Result<(mpsc::Receiver<StreamEvent>, CancellationToken)> {
         let (tx, rx) = mpsc::channel(100);
         let cancellation_token = CancellationToken::new();
@@ -234,6 +237,7 @@ impl AnthropicClient {
                 messages,
                 max_tokens: 4096,
                 stream: true,
+                system: system_prompt,
                 tools,
             };
 
