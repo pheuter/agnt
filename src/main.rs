@@ -334,7 +334,6 @@ async fn run_app(
                     }
                     anthropic::StreamEvent::ConnectionStatus(status) => {
                         app.set_connection_status(Some(status.clone()));
-                        log_debug!("Connection status: {}", status);
                     }
                 },
                 Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -364,6 +363,12 @@ async fn run_app(
                         continue;
                     }
 
+                    // If help modal is shown, any key press closes it
+                    if app.show_help {
+                        app.toggle_help();
+                        continue;
+                    }
+
                     match key.code {
                         KeyCode::Char('c')
                             if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
@@ -371,11 +376,38 @@ async fn run_app(
                             log_debug!("User requested termination with Ctrl+C");
                             return Ok(());
                         }
+                        KeyCode::Char('h')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
+                            app.toggle_help();
+                        }
                         KeyCode::Esc => {
-                            // Cancel streaming if it's in progress
-                            if let Some(token) = stream_cancellation.take() {
+                            // Cancel slash command if active
+                            if app.slash_command_state.is_some() {
+                                app.cancel_slash_command();
+                                app.clear_input();
+                            } else if let Some(token) = stream_cancellation.take() {
+                                // Cancel streaming if it's in progress
                                 token.cancel();
                                 // The stream will clean up on the next iteration
+                            }
+                        }
+                        KeyCode::Tab => {
+                            // Navigate slash command suggestions
+                            if let Some(state) = &mut app.slash_command_state {
+                                state.next_suggestion();
+                            }
+                        }
+                        KeyCode::Down => {
+                            // Navigate slash command suggestions
+                            if let Some(state) = &mut app.slash_command_state {
+                                state.next_suggestion();
+                            }
+                        }
+                        KeyCode::Up => {
+                            // Navigate slash command suggestions
+                            if let Some(state) = &mut app.slash_command_state {
+                                state.prev_suggestion();
                             }
                         }
                         KeyCode::Char('s')
@@ -403,7 +435,12 @@ async fn run_app(
                             app.input.push('\n');
                         }
                         KeyCode::Enter => {
-                            if !app.input.is_empty() && !app.is_waiting {
+                            // Handle slash command execution
+                            if let Some(state) = &app.slash_command_state {
+                                if let Some(cmd) = state.get_selected() {
+                                    app.execute_slash_command(cmd.action.clone());
+                                }
+                            } else if !app.input.is_empty() && !app.is_waiting {
                                 let user_message = app.input.clone();
                                 app.clear_input();
                                 app.add_message("user".to_string(), user_message.clone());
@@ -462,10 +499,30 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char(c) => {
-                            app.input.push(c);
+                            // Check if starting a slash command
+                            if c == '/' && app.input.is_empty() && !app.is_waiting {
+                                app.input.push(c);
+                                app.start_slash_command();
+                            } else if app.slash_command_state.is_some() {
+                                app.input.push(c);
+                                let input_copy = app.input.clone();
+                                app.update_slash_command(&input_copy[1..]); // Skip the '/'
+                            } else {
+                                app.input.push(c);
+                            }
                         }
                         KeyCode::Backspace => {
                             app.input.pop();
+
+                            // Update or cancel slash command state
+                            if app.slash_command_state.is_some() {
+                                if app.input.is_empty() {
+                                    app.cancel_slash_command();
+                                } else {
+                                    let input_copy = app.input.clone();
+                                    app.update_slash_command(&input_copy[1..]); // Skip the '/'
+                                }
+                            }
                         }
                         KeyCode::PageUp => {
                             app.scroll_up(10);

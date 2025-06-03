@@ -1,9 +1,9 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
 #[derive(Debug, Clone)]
@@ -22,6 +22,64 @@ pub enum MessageContent {
     ApiError(String),
 }
 
+#[derive(Debug, Clone)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+    pub action: SlashCommandAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SlashCommandAction {
+    Clear,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlashCommandState {
+    pub input_buffer: String,
+    pub suggestions: Vec<SlashCommand>,
+    pub selected_index: usize,
+}
+
+impl SlashCommandState {
+    pub fn new() -> Self {
+        Self {
+            input_buffer: String::new(),
+            suggestions: Vec::new(),
+            selected_index: 0,
+        }
+    }
+
+    pub fn update_suggestions(&mut self, commands: &[SlashCommand]) {
+        self.suggestions = commands
+            .iter()
+            .filter(|cmd| cmd.name.starts_with(&self.input_buffer))
+            .cloned()
+            .collect();
+        self.selected_index = 0;
+    }
+
+    pub fn next_suggestion(&mut self) {
+        if !self.suggestions.is_empty() {
+            self.selected_index = (self.selected_index + 1) % self.suggestions.len();
+        }
+    }
+
+    pub fn prev_suggestion(&mut self) {
+        if !self.suggestions.is_empty() {
+            self.selected_index = if self.selected_index == 0 {
+                self.suggestions.len() - 1
+            } else {
+                self.selected_index - 1
+            };
+        }
+    }
+
+    pub fn get_selected(&self) -> Option<&SlashCommand> {
+        self.suggestions.get(self.selected_index)
+    }
+}
+
 pub struct App {
     pub input: String,
     pub messages: Vec<(String, Vec<MessageContent>)>, // (role, content parts)
@@ -36,10 +94,19 @@ pub struct App {
     pub loading_animation_frame: usize,         // Current frame of loading animation
     pub last_animation_update: std::time::Instant, // Time of last animation update
     pub connection_status: Option<String>,      // Current connection status
+    pub show_help: bool,                        // Whether to show help modal
+    pub slash_command_state: Option<SlashCommandState>, // Slash command autocomplete state
+    pub available_commands: Vec<SlashCommand>,  // Available slash commands
 }
 
 impl Default for App {
     fn default() -> Self {
+        let available_commands = vec![SlashCommand {
+            name: "clear".to_string(),
+            description: "Clear the conversation history".to_string(),
+            action: SlashCommandAction::Clear,
+        }];
+
         Self {
             input: String::new(),
             messages: Vec::new(),
@@ -54,6 +121,9 @@ impl Default for App {
             loading_animation_frame: 0,
             last_animation_update: std::time::Instant::now(),
             connection_status: None,
+            show_help: false,
+            slash_command_state: None,
+            available_commands,
         }
     }
 }
@@ -177,6 +247,10 @@ impl App {
         self.code_execution_enabled = !self.code_execution_enabled;
     }
 
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
+
     pub fn update_file_metadata(&mut self, file_id: String, filename: String) {
         // Update file metadata in all messages
         for (_, contents) in &mut self.messages {
@@ -202,6 +276,38 @@ impl App {
             }
         }
     }
+
+    pub fn start_slash_command(&mut self) {
+        let mut state = SlashCommandState::new();
+        state.update_suggestions(&self.available_commands);
+        self.slash_command_state = Some(state);
+    }
+
+    pub fn update_slash_command(&mut self, input: &str) {
+        if let Some(state) = &mut self.slash_command_state {
+            state.input_buffer = input.to_string();
+            state.update_suggestions(&self.available_commands);
+        }
+    }
+
+    pub fn cancel_slash_command(&mut self) {
+        self.slash_command_state = None;
+    }
+
+    pub fn execute_slash_command(&mut self, action: SlashCommandAction) {
+        match action {
+            SlashCommandAction::Clear => {
+                self.messages.clear();
+                self.streaming_content.clear();
+                self.scroll_position = 0;
+                self.auto_scroll = true;
+                self.total_lines = 0;
+                self.container_info = None;
+            }
+        }
+        self.slash_command_state = None;
+        self.clear_input();
+    }
 }
 
 pub fn ui(f: &mut Frame, app: &mut App) {
@@ -216,6 +322,16 @@ pub fn ui(f: &mut Frame, app: &mut App) {
 
     render_messages(f, app, chunks[0]);
     render_input(f, app, chunks[1]);
+
+    // Render slash command autocomplete menu if active
+    if let Some(state) = &app.slash_command_state {
+        render_slash_command_menu(f, state, chunks[1]);
+    }
+
+    // Render help modal if active
+    if app.show_help {
+        render_help_modal(f);
+    }
 }
 
 fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
@@ -411,10 +527,7 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
         } else {
             Color::Cyan
         };
-        (
-            "Input (Enter: send, Alt+Enter: newline, Ctrl+C: quit, Ctrl+S: selection, Ctrl+X: toggle code)",
-            border_color,
-        )
+        ("Input (Ctrl+H: help, Ctrl+C: exit)", border_color)
     };
 
     let input = Paragraph::new(app.input.as_str())
@@ -603,4 +716,234 @@ fn render_content(lines: &mut Vec<Line<'static>>, content: &MessageContent, pref
             ]));
         }
     }
+}
+
+fn render_help_modal(f: &mut Frame) {
+    let area = centered_rect(60, 80, f.area());
+
+    // Clear the area behind the modal
+    f.render_widget(Clear, area);
+
+    // Create help content
+    let help_text = vec![
+        Line::from(vec![Span::styled(
+            "agnt Help",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Message Input",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![
+            Span::styled("  Enter         ", Style::default().fg(Color::Magenta)),
+            Span::styled("Send message", Style::default().fg(Color::Black)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Alt+Enter     ", Style::default().fg(Color::Magenta)),
+            Span::styled("Insert newline", Style::default().fg(Color::Black)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc           ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                "Cancel streaming response",
+                Style::default().fg(Color::Black),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Navigation",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![
+            Span::styled("  Page Up       ", Style::default().fg(Color::Magenta)),
+            Span::styled("Scroll up 10 lines", Style::default().fg(Color::Black)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Page Down     ", Style::default().fg(Color::Magenta)),
+            Span::styled("Scroll down 10 lines", Style::default().fg(Color::Black)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Mouse Wheel   ", Style::default().fg(Color::Magenta)),
+            Span::styled("Scroll up/down 3 lines", Style::default().fg(Color::Black)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Modes",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![
+            Span::styled("  Ctrl+S        ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                "Toggle selection mode (for copying text)",
+                Style::default().fg(Color::Black),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+X        ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                "Toggle code execution mode",
+                Style::default().fg(Color::Black),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "General",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![
+            Span::styled("  Ctrl+H        ", Style::default().fg(Color::Magenta)),
+            Span::styled("Show/hide this help", Style::default().fg(Color::Black)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+C        ", Style::default().fg(Color::Magenta)),
+            Span::styled("Quit agnt", Style::default().fg(Color::Black)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Press any key to close this help",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )]),
+    ];
+
+    let help = Paragraph::new(help_text)
+        .block(
+            Block::default()
+                .title(" Help ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .style(Style::default().bg(Color::Indexed(252))),
+        )
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(help, area);
+}
+
+fn render_slash_command_menu(f: &mut Frame, state: &SlashCommandState, input_area: Rect) {
+    if state.suggestions.is_empty() {
+        return;
+    }
+
+    // Calculate maximum width needed for the menu
+    let max_cmd_width = state
+        .suggestions
+        .iter()
+        .map(|cmd| cmd.name.len() + cmd.description.len() + 7) // +7 for "/ - " and some padding
+        .max()
+        .unwrap_or(20);
+
+    // Calculate menu dimensions
+    let menu_height = (state.suggestions.len() as u16 + 2).min(8); // +2 for borders, max 8 lines
+    let menu_y = input_area.y.saturating_sub(menu_height);
+    let menu_width = (max_cmd_width as u16 + 4).min(input_area.width.saturating_sub(2)); // +4 for padding and borders
+
+    let menu_area = Rect {
+        x: input_area.x,
+        y: menu_y,
+        width: menu_width,
+        height: menu_height,
+    };
+
+    // Clear the area behind the menu
+    f.render_widget(Clear, menu_area);
+
+    // Add a subtle shadow effect
+    let shadow_area = Rect {
+        x: menu_area.x.saturating_add(1),
+        y: menu_area.y.saturating_add(1),
+        width: menu_area.width.saturating_sub(1),
+        height: menu_area.height.saturating_sub(1),
+    };
+
+    if shadow_area.width > 0 && shadow_area.height > 0 {
+        let shadow = Block::default().style(Style::default().bg(Color::Indexed(233))); // Very dark shadow
+        f.render_widget(shadow, shadow_area);
+    }
+
+    // Create list items
+    let items: Vec<ListItem> = state
+        .suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let is_selected = i == state.selected_index;
+
+            let content = if is_selected {
+                Line::from(vec![
+                    Span::styled(
+                        format!(" /{}", cmd.name),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" - {} ", cmd.description),
+                        Style::default().fg(Color::Black).bg(Color::Cyan),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("/{}", cmd.name),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" - ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(&cmd.description, Style::default().fg(Color::Gray)),
+                    Span::raw(" "),
+                ])
+            };
+
+            ListItem::new(content)
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .title("┤ Commands ├")
+            .title_alignment(Alignment::Center)
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().bg(Color::Indexed(235))), // Very dark gray background
+    );
+
+    f.render_widget(list, menu_area);
+}
+
+// Helper function to center a rect
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
