@@ -6,6 +6,14 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToolMode {
+    None,
+    CodeExecution,
+    WebSearch,
+    Both,
+}
+
 #[derive(Debug, Clone)]
 pub enum MessageContent {
     Text(String),
@@ -90,7 +98,7 @@ pub struct App {
     pub total_lines: usize,                     // Total number of lines in the conversation
     pub selection_mode: bool,                   // Toggle for text selection mode
     pub container_info: Option<(String, String)>, // Container ID and expiration
-    pub code_execution_enabled: bool,           // Whether code execution is enabled
+    pub tool_mode: ToolMode,                    // Currently active tools
     pub loading_animation_frame: usize,         // Current frame of loading animation
     pub last_animation_update: std::time::Instant, // Time of last animation update
     pub connection_status: Option<String>,      // Current connection status
@@ -117,7 +125,7 @@ impl Default for App {
             total_lines: 0,
             selection_mode: false,
             container_info: None,
-            code_execution_enabled: false,
+            tool_mode: ToolMode::None,
             loading_animation_frame: 0,
             last_animation_update: std::time::Instant::now(),
             connection_status: None,
@@ -244,7 +252,21 @@ impl App {
     }
 
     pub fn toggle_code_execution(&mut self) {
-        self.code_execution_enabled = !self.code_execution_enabled;
+        self.tool_mode = match self.tool_mode {
+            ToolMode::None => ToolMode::CodeExecution,
+            ToolMode::CodeExecution => ToolMode::None,
+            ToolMode::WebSearch => ToolMode::Both,
+            ToolMode::Both => ToolMode::WebSearch,
+        };
+    }
+
+    pub fn toggle_web_search(&mut self) {
+        self.tool_mode = match self.tool_mode {
+            ToolMode::None => ToolMode::WebSearch,
+            ToolMode::WebSearch => ToolMode::None,
+            ToolMode::CodeExecution => ToolMode::Both,
+            ToolMode::Both => ToolMode::CodeExecution,
+        };
     }
 
     pub fn toggle_help(&mut self) {
@@ -347,10 +369,19 @@ fn render_messages(f: &mut Frame, app: &mut App, area: Rect) {
     // Create title
     let title = if app.selection_mode {
         "agnt (SELECTION MODE - Press Ctrl+S to exit)".to_string()
-    } else if app.code_execution_enabled {
-        "agnt (CODE EXECUTION ENABLED - Press Ctrl+X to disable)".to_string()
     } else {
         let mut title_parts = vec!["agnt".to_string()];
+
+        // Add tool mode info
+        let tool_info = match app.tool_mode {
+            ToolMode::CodeExecution => "(CODE EXECUTION - Ctrl+X to toggle)",
+            ToolMode::WebSearch => "(WEB SEARCH - Ctrl+W to toggle)",
+            ToolMode::Both => "(CODE EXECUTION + WEB SEARCH - Ctrl+X/W to toggle)",
+            ToolMode::None => "",
+        };
+        if !tool_info.is_empty() {
+            title_parts.push(tool_info.to_string());
+        }
 
         // Add container info if present
         if let Some((id, _)) = &app.container_info {
@@ -515,17 +546,20 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
             Color::Yellow,
         )
     } else if app.is_waiting {
-        let waiting_text = if app.code_execution_enabled {
-            "Input (waiting for response with code execution... Esc: cancel)"
-        } else {
-            "Input (waiting for response... Esc: cancel)"
+        let waiting_text = match app.tool_mode {
+            ToolMode::CodeExecution => {
+                "Input (waiting for response with code execution... Esc: cancel)"
+            }
+            ToolMode::WebSearch => "Input (waiting for response with web search... Esc: cancel)",
+            ToolMode::Both => "Input (waiting for response with code + web search... Esc: cancel)",
+            ToolMode::None => "Input (waiting for response... Esc: cancel)",
         };
         (waiting_text, Color::DarkGray)
     } else {
-        let border_color = if app.code_execution_enabled {
-            Color::Magenta // Pink/red color for code execution
-        } else {
-            Color::Cyan
+        let border_color = match app.tool_mode {
+            ToolMode::CodeExecution | ToolMode::Both => Color::Magenta, // Pink/red color for code execution
+            ToolMode::WebSearch => Color::Blue,                         // Blue for web search
+            ToolMode::None => Color::Cyan,
         };
         ("Input (Ctrl+H: help, Ctrl+C: exit)", border_color)
     };
@@ -793,6 +827,10 @@ fn render_help_modal(f: &mut Frame) {
                 "Toggle code execution mode",
                 Style::default().fg(Color::Black),
             ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+W        ", Style::default().fg(Color::Magenta)),
+            Span::styled("Toggle web search mode", Style::default().fg(Color::Black)),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(

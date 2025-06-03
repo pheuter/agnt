@@ -6,11 +6,13 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::ui::ToolMode;
+
 #[derive(Debug, Clone)]
 pub struct AnthropicClient {
     api_key: String,
     client: Client,
-    enable_code_execution: bool,
+    tool_mode: ToolMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -166,17 +168,17 @@ impl AnthropicClient {
         Self {
             api_key,
             client: Client::new(),
-            enable_code_execution: false,
+            tool_mode: ToolMode::None,
         }
     }
 
-    pub fn with_code_execution(mut self, enable: bool) -> Self {
-        self.enable_code_execution = enable;
+    pub fn with_tool_mode(mut self, mode: ToolMode) -> Self {
+        self.tool_mode = mode;
         self
     }
 
-    pub fn is_code_execution_enabled(&self) -> bool {
-        self.enable_code_execution
+    pub fn tool_mode(&self) -> ToolMode {
+        self.tool_mode
     }
 
     pub async fn send_message_stream(
@@ -190,7 +192,7 @@ impl AnthropicClient {
         // Clone necessary data for the spawned task
         let api_key = self.api_key.clone();
         let client = self.client.clone();
-        let enable_code_execution = self.enable_code_execution;
+        let tool_mode = self.tool_mode;
 
         // Spawn the entire request handling as a separate task
         tokio::spawn(async move {
@@ -202,13 +204,26 @@ impl AnthropicClient {
                 .await;
 
             // Build the request
-            let tools = if enable_code_execution {
-                Some(vec![Tool {
+            let tools = match tool_mode {
+                ToolMode::None => None,
+                ToolMode::CodeExecution => Some(vec![Tool {
                     tool_type: "code_execution_20250522".to_string(),
                     name: "code_execution".to_string(),
-                }])
-            } else {
-                None
+                }]),
+                ToolMode::WebSearch => Some(vec![Tool {
+                    tool_type: "web_search_20250305".to_string(),
+                    name: "web_search".to_string(),
+                }]),
+                ToolMode::Both => Some(vec![
+                    Tool {
+                        tool_type: "code_execution_20250522".to_string(),
+                        name: "code_execution".to_string(),
+                    },
+                    Tool {
+                        tool_type: "web_search_20250305".to_string(),
+                        name: "web_search".to_string(),
+                    },
+                ]),
             };
 
             let model = std::env::var("ANTHROPIC_MODEL")
@@ -228,7 +243,7 @@ impl AnthropicClient {
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json");
 
-            if enable_code_execution {
+            if matches!(tool_mode, ToolMode::CodeExecution | ToolMode::Both) {
                 request_builder = request_builder.header(
                     "anthropic-beta",
                     "code-execution-2025-05-22,files-api-2025-04-14",

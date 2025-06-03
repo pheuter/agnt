@@ -21,7 +21,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use ui::App;
+use ui::{App, ToolMode};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -37,6 +37,10 @@ struct Args {
     /// Enable code execution (requires Claude model that supports it)
     #[arg(short = 'x', long)]
     code_execution: bool,
+
+    /// Enable web search (requires Claude model that supports it)
+    #[arg(short = 'w', long)]
+    web_search: bool,
 
     /// Directory to save files created by code execution (default: ./output when code execution is enabled)
     #[arg(short = 'o', long, value_name = "DIR")]
@@ -76,10 +80,18 @@ async fn main() -> Result<()> {
         std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
     log_debug!("Initialized with ANTHROPIC_MODEL: {}", model);
 
-    let client = anthropic::AnthropicClient::new(api_key).with_code_execution(args.code_execution);
+    // Determine initial tool mode based on CLI flags
+    let initial_tool_mode = match (args.code_execution, args.web_search) {
+        (true, true) => ToolMode::Both,
+        (true, false) => ToolMode::CodeExecution,
+        (false, true) => ToolMode::WebSearch,
+        (false, false) => ToolMode::None,
+    };
+
+    let client = anthropic::AnthropicClient::new(api_key).with_tool_mode(initial_tool_mode);
 
     // Default output directory to "output" if code execution is enabled and no dir specified
-    let output_dir = if args.code_execution {
+    let output_dir = if matches!(initial_tool_mode, ToolMode::CodeExecution | ToolMode::Both) {
         Some(args.output_dir.unwrap_or_else(|| "output".to_string()))
     } else {
         args.output_dir
@@ -216,12 +228,12 @@ async fn run_tui_mode(
     execute!(terminal.backend_mut(), EnableMouseCapture)?;
 
     let mut app = App {
-        code_execution_enabled: client.is_code_execution_enabled(),
+        tool_mode: client.tool_mode(),
         ..Default::default()
     };
 
     // If code execution is enabled but no output dir specified, default to "output"
-    if app.code_execution_enabled && output_dir.is_none() {
+    if matches!(app.tool_mode, ToolMode::CodeExecution | ToolMode::Both) && output_dir.is_none() {
         output_dir = Some("output".to_string());
     }
 
@@ -427,7 +439,20 @@ async fn run_app(
                         {
                             app.toggle_code_execution();
                             // If code execution is enabled and output_dir is None, set it to default
-                            if app.code_execution_enabled && output_dir.is_none() {
+                            if matches!(app.tool_mode, ToolMode::CodeExecution | ToolMode::Both)
+                                && output_dir.is_none()
+                            {
+                                output_dir = Some("output".to_string());
+                            }
+                        }
+                        KeyCode::Char('w')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
+                            app.toggle_web_search();
+                            // If code execution is enabled and output_dir is None, set it to default
+                            if matches!(app.tool_mode, ToolMode::CodeExecution | ToolMode::Both)
+                                && output_dir.is_none()
+                            {
                                 output_dir = Some("output".to_string());
                             }
                         }
@@ -475,13 +500,12 @@ async fn run_app(
                                     }
                                 }
 
-                                // Create a new client with the current code execution setting
-                                let client_with_code = client
-                                    .clone()
-                                    .with_code_execution(app.code_execution_enabled);
+                                // Create a new client with the current tool settings
+                                let client_with_tools =
+                                    client.clone().with_tool_mode(app.tool_mode);
 
                                 // send_message_stream now returns immediately with channel and cancellation token
-                                match client_with_code.send_message_stream(messages).await {
+                                match client_with_tools.send_message_stream(messages).await {
                                     Ok((receiver, cancellation)) => {
                                         stream_receiver = Some(receiver);
                                         stream_cancellation = Some(cancellation);
