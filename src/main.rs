@@ -61,20 +61,28 @@ async fn main() -> Result<()> {
     };
 
     // Set up panic hook to log termination on panic
-    std::panic::set_hook(Box::new(|panic_info| {
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Try to log, but don't panic if logging fails
         log_debug!("=== AGNT Terminated (panic) ===");
         log_debug!("Panic info: {}", panic_info);
 
         // Call the default panic handler to get standard panic output
-        let default_panic = std::panic::take_hook();
         default_panic(panic_info);
     }));
 
     log_debug!("=== AGNT Started ===");
     log_debug!("Args: {:?}", args);
 
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .expect("ANTHROPIC_API_KEY must be set in environment or .env file");
+    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(key) => key,
+        Err(_) => {
+            eprintln!("Error: ANTHROPIC_API_KEY environment variable is not set");
+            eprintln!("Please set your Anthropic API key:");
+            eprintln!("  export ANTHROPIC_API_KEY=your_api_key_here");
+            return Ok(());
+        }
+    };
 
     let model =
         std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
